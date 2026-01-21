@@ -157,5 +157,6 @@ def optimize(
 
 if __name__ == "__main__":
     # Use device="cpu" if you don't have a GPU
-    duration = optimize(num_triangles=3, env_idx=0, num_particles=512, device="cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    duration = optimize(num_triangles=3, env_idx=0, num_particles=512, device=device)
     print("Time to solution:", duration)
