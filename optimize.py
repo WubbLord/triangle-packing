@@ -6,6 +6,8 @@ from datetime import datetime
 import rerun as rr
 import torch
 
+from typing import Optional
+
 assets_dir = os.path.join(os.path.dirname(__file__), "assets")
 
 
@@ -29,7 +31,8 @@ def load_env(num_triangles: int, env_idx: int) -> dict:
     assert (
         len(env) == num_triangles + 1
     ), f"Expected {num_triangles + 1} objects, got {len(env)}"
-    print(f"Loaded num_triangles={num_triangles} and idx={env_idx} from {tri_env_path}")
+    # print(f"Loaded num_triangles={num_triangles} and idx={env_idx} from {tri_env_path}")
+    # print("env=", env)
     return env
 
 
@@ -91,11 +94,12 @@ def optimize(
     env_idx: int,
     num_particles: int,
     visualize: bool = True,
-    device: str = "cuda",
+    device: Optional[str] = "cuda",
 ) -> float:
     """
     Solve the triangle packing problem. Returns the time required to find a satisfying particle.
     """
+
     env = load_env(num_triangles, env_idx)
 
     if visualize:
@@ -104,7 +108,7 @@ def optimize(
         visualize_env(env)
 
     goal_aabb = get_goal_aabb(env).to(device)
-    print(f"Goal AABB: {goal_aabb}")
+    # print(f"Goal AABB: {goal_aabb}")
 
     triangles = {
         label: torch.tensor(obj["vertices"], device=device)
@@ -121,7 +125,7 @@ def optimize(
         rot = torch.rand(num_particles, 1, device=device) * 2 * torch.pi
         xy_rot = torch.cat((xy, rot), dim=1)
         particles[triangle] = xy_rot
-        print(f"Triangle {triangle} particles shape: {xy_rot.shape}")
+        # print(f"Triangle {triangle} particles shape: {xy_rot.shape}")
 
     # Your code starts here. Feel free to write any additional methods you need.
     # You should track the time required to find a satisfying particle along with other metrics you think are relevant
@@ -139,7 +143,19 @@ def optimize(
             best_idx = 0
             for triangle, vertices in triangles.items():
                 xy_rot = particles[triangle][best_idx].detach().clone()
-                # TODO: transform the triangle vertices by the rotation and xy translation
+                # Transform the triangle vertices by the rotation and xy translation
+                xy = xy_rot[:2]
+                rot = xy_rot[2]
+                xy = torch.tensor([0, 0])
+                # rot = torch.tensor(torch.pi/2)
+                rot_matrix = torch.tensor([[rot.cos(), rot.sin()], [-rot.sin(), rot.cos()]])
+                triangle_centroid = vertices.sum(dim=0).div(vertices.shape[0])
+                centered_vertices = vertices - triangle_centroid
+                print(vertices)
+                vertices = centered_vertices @ rot_matrix.T + triangle_centroid + xy
+                print(vertices)
+                print(vertices.sum(dim=0).div(vertices.shape[0]))
+
                 vertices_3d = torch.cat(
                     (vertices, torch.zeros_like(vertices[:, :1])), dim=1
                 )
@@ -158,5 +174,6 @@ def optimize(
 if __name__ == "__main__":
     # Use device="cpu" if you don't have a GPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    duration = optimize(num_triangles=3, env_idx=0, num_particles=512, device=device)
-    print("Time to solution:", duration)
+    torch.manual_seed(13)
+    duration = optimize(num_triangles=3, env_idx=0, num_particles=512, visualize=True, device=device)
+    # print("Time to solution:", duration)
