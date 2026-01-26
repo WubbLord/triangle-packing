@@ -5,13 +5,14 @@ import numpy as np
 
 def run_experiments():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_runs_per_env = 5
+    num_runs_per_env = 1
     env_idxs = list(range(10))
-    all_triangles = [3, 4, 5]
+    all_triangles = [i for i in range(3, 7)]
 
     results = []
     for num_triangles in all_triangles:
         for env_idx in env_idxs:
+            print(f"Running experiments for {num_triangles} triangles and environment {env_idx}")
             time_to_solutions = []
             for run_idx in range(num_runs_per_env):
                 time_to_solution = optimize(
@@ -42,4 +43,5 @@ def run_experiments():
 
 
 if __name__ == "__main__":
+    torch.manual_seed(13)
     run_experiments()

@@ -126,10 +126,6 @@ def compute_bbox_loss(transformed_vertices, goal_aabb):
     min_corner = goal_aabb[0]  # (2,)
     max_corner = goal_aabb[1]  # (2,)
     
-    # total_loss = torch.zeros(num_particles, device=device)
-    # for verts in transformed_vertices:
-    #     loss = (torch.relu(min_corner - verts) + torch.relu(verts - max_corner)).sum(dim=(1, 2))
-    #     total_loss += loss
     loss = (torch.relu(min_corner - transformed_vertices) + torch.relu(transformed_vertices - max_corner)).sum(dim=(3, 2, 1)) # MAYBE optimize
     return loss
 
@@ -160,43 +156,112 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     C = edges_j[..., 0, :]  # (P, 1, T, 1, 3, 2)
     D = edges_j[..., 1, :]  # (P, 1, T, 1, 3, 2)
     
-    # Compute direction vectors and AC
-    # These broadcast to (P, T, T, 3, 3, 2)
-    AB = B - A
-    CD = D - C
-    AC = C - A
+    AB = B - A # (P, T, T, 3, 3, 2)
+    CD = D - C # (P, T, T, 3, 3, 2)
+    AC = C - A # (P, T, T, 3, 3, 2)
     
+    # solve for A + t * AB = C + s * CD
     denom = AB[..., 0] * CD[..., 1] - AB[..., 1] * CD[..., 0]  # (P, T, T, 3, 3)
     eps = 1e-8
     parallel_mask = denom.abs() < eps
     denom_safe = torch.where(parallel_mask, torch.ones_like(denom) * 1e-8, denom)
+    t = (AC[..., 0] * CD[..., 1] - AC[..., 1] * CD[..., 0]) / denom_safe  # (AC x CD) / (AB x CD) => (P, T, T, 3, 3)
+    s = (AC[..., 0] * AB[..., 1] - AC[..., 1] * AB[..., 0]) / denom_safe  # (AC x AB) / (AB x CD) => (P, T, T, 3, 3)
     
-    # parametric intersection parameters
-    t = (AC[..., 0] * CD[..., 1] - AC[..., 1] * CD[..., 0]) / denom_safe  # cross(AC, CD) / cross(AB, CD) => (P, T, T, 3, 3)
-    s = (AC[..., 0] * AB[..., 1] - AC[..., 1] * AB[..., 0]) / denom_safe  # cross(AC, AB) / cross(AB, CD) => (P, T, T, 3, 3)
-    
-    # Distance from [0, 1] range: 0 when inside, positive when outside
     dist_t = torch.relu(-t) + torch.relu(t - 1)
     dist_s = torch.relu(-s) + torch.relu(s - 1)
-    
-    # Total separation distance (0 means edges intersect)
+    # dist_t = torch.relu(t) * (t < 0.5) + torch.relu(t - 1) * (t > 0.5)
+    # dist_s = torch.relu(s) * (s < 0.5) + torch.relu(s - 1) * (s > 0.5)
     dist = dist_t + dist_s  # (P, T, T, 3, 3)
     
-    # For parallel edges, set large distance (no intersection)
-    dist = torch.where(parallel_mask, torch.ones_like(dist) * 10.0, dist)
-    
-    # ReLU signed distance: penalize when dist < threshold
+    # set large distance for parallel edges
+    dist = torch.where(parallel_mask, torch.ones_like(dist) * 5.0, dist)
     loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
+    # loss = torch.relu(dist - threshold)  # (P, T, T, 3, 3)
     
-    # Create upper triangular mask to only count each triangle pair once (i < j)
-    # This avoids double-counting and self-intersection
-    upper_tri_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-    # Expand mask to match loss shape: (1, T, T, 1, 1)
-    upper_tri_mask = upper_tri_mask.view(1, T, T, 1, 1)
+    # remove double counting and comparisons within same triangle
+    upper_triangle_mask = torch.triu(torch.ones(T, T, device=transformed_vertices.device, dtype=torch.bool), diagonal=1)
+    upper_triangle_mask = upper_triangle_mask.view(1, T, T, 1, 1)
+    masked_loss = loss * upper_triangle_mask # (P, T, T, 3, 3)
+    total_loss = masked_loss.sum(dim=(-1, -2, -3, -4))  # (P,)
     
-    # Apply mask and sum over all dimensions except particles
-    masked_loss = loss * upper_tri_mask
-    total_loss = masked_loss.sum(dim=(1, 2, 3, 4))  # (P,)
+    return total_loss
+
+
+def compute_vertex_inside_loss(transformed_vertices, threshold=1e-3):
+    """
+    Compute loss for vertices that are inside other triangles.
+    Uses cross products to check if a point is inside (CCW triangles).
+    If inside, adds perpendicular distance to closest edge.
+    
+    Args:
+        transformed_vertices: (P, T, 3, 2) tensor
+        threshold: not used currently, kept for API consistency
+    Returns:
+        (P,) - loss for each particle
+    """
+    T = transformed_vertices.shape[-3]
+    
+    X = transformed_vertices.unsqueeze(2)  # (P, T, 1, 3, 2)
+    
+    tri = transformed_vertices.unsqueeze(1)  # (P, 1, T, 3, 2)
+    A = tri[..., 0, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
+    B = tri[..., 1, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
+    C = tri[..., 2, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
+    
+    XA = A - X  # (P, T, T, 3, 2)
+    XB = B - X
+    XC = C - X
+    
+    # point X is inside tri if all cross products >= 0
+    cross_ab = XA[..., 0] * XB[..., 1] - XA[..., 1] * XB[..., 0]  # (P, T, T, 3)
+    cross_bc = XB[..., 0] * XC[..., 1] - XB[..., 1] * XC[..., 0]
+    cross_ca = XC[..., 0] * XA[..., 1] - XC[..., 1] * XA[..., 0]
+    
+    # Inside if all cross products >= 0 (point on left side of all edges)
+    inside_mask = (cross_ab >= 0) & (cross_bc >= 0) & (cross_ca >= 0)  # (P, T, T, 3)
+    
+    # Exclude same triangle (vertex should not be checked against its own triangle)
+    same_tri_mask = torch.eye(T, device=transformed_vertices.device, dtype=torch.bool)
+    same_tri_mask = same_tri_mask.view(1, T, T, 1)  # (1, T_i, T_j, 1)
+    inside_mask = inside_mask & ~same_tri_mask
+    
+    # Compute perpendicular distances to edges
+    # Distance from point X to edge PQ = |PQ × PX| / |PQ|
+    # Edge vectors
+    AB = B - A  # (P, 1, T, 1, 2)
+    BC = C - B
+    CA = A - C
+    
+    # Vectors from edge start to point X
+    AX = X - A  # broadcasts to (P, T, T, 3, 2)
+    BX = X - B
+    CX = X - C
+    
+    # Cross products for perpendicular distance (2D cross gives signed area * 2)
+    cross_AB_AX = AB[..., 0] * AX[..., 1] - AB[..., 1] * AX[..., 0]  # (P, T, T, 3)
+    cross_BC_BX = BC[..., 0] * BX[..., 1] - BC[..., 1] * BX[..., 0]
+    cross_CA_CX = CA[..., 0] * CX[..., 1] - CA[..., 1] * CX[..., 0]
+    
+    # Edge lengths
+    eps = 1e-8
+    len_AB = AB.norm(dim=-1) + eps  # (P, 1, T, 1)
+    len_BC = BC.norm(dim=-1) + eps
+    len_CA = CA.norm(dim=-1) + eps
+    
+    # Perpendicular distances (absolute value since we want distance, not signed)
+    dist_AB = cross_AB_AX.abs() / len_AB  # (P, T, T, 3)
+    dist_BC = cross_BC_BX.abs() / len_BC
+    dist_CA = cross_CA_CX.abs() / len_CA
+    
+    # Minimum distance to any edge
+    min_dist = torch.minimum(torch.minimum(dist_AB, dist_BC), dist_CA)  # (P, T, T, 3)
+    
+    # Loss: only count vertices that are inside another triangle
+    loss = min_dist * inside_mask.float()  # (P, T, T, 3)
+    
+    # Sum over all vertex-triangle pairs
+    total_loss = loss.sum(dim=(-1, -2, -3))  # (P,)
     
     return total_loss
 
@@ -205,8 +270,8 @@ def optimize(
     num_triangles: int,
     env_idx: int,
     num_particles: int,
-    visualize: bool = True,
-    device: str = "cpu",
+    visualize: bool,
+    device: str
 ) -> float:
     """
     Solve the triangle packing problem. Returns the time required to find a satisfying particle.
@@ -238,35 +303,42 @@ def optimize(
         xy_rot = torch.cat((xy, rot), dim=1)
         particles[triangle] = xy_rot
 
+    # make all vertices in CCW in triangles
+    for key in triangles:
+        verts = triangles[key]  # (3, 2)
+        x = verts[:, 0] # (3,)
+        y = verts[:, 1] # (3,)
+        area_twice = (
+            (x[0] * y[1] - x[1] * y[0]) +
+            (x[1] * y[2] - x[2] * y[1]) +
+            (x[2] * y[0] - x[0] * y[2])
+        )
+        if area_twice < 0:
+            triangles[key] = verts[[0, 2, 1]]
+
     # Your code starts here. Feel free to write any additional methods you need.
     # You should track the time required to find a satisfying particle along with other metrics you think are relevant
     start_time = time.perf_counter()
     found_solution = False
     
-    # vertices = torch.stack([torch.tensor(triangles[label]) for label in triangles.keys()]) # (T, 3, 2)\
     vertices = torch.stack([triangle_vertices for triangle_vertices in triangles.values()]) # (T, 3, 2)
-    # triangle_labels = list(triangles.keys())
     params = torch.stack([particles[triangle] for triangle in triangles], dim=1).requires_grad_(True) # (P, T, 3)
-    # active_mask = torch.ones(num_particles, dtype=torch.bool, device=device)
     optimizer = torch.optim.Adam([params], lr=0.01)
 
     epochs = 2000
     for epoch in range(epochs):
         optimizer.zero_grad()
-        # transformed_vertices = [transform_vertices_batch(triangles[label], params[:, i, :]) for i, label in enumerate(triangle_labels)]
-        # transformed_vertices = torch.stack([transform_vertices_batch(triangles[label], params[:, i, :]) for i, label in enumerate(triangle_labels)])
+        
         transformed_vertices = transform_vertices(vertices, params) # (P, T, 3, 2)
         
         bbox_loss = compute_bbox_loss(transformed_vertices, goal_aabb)  # (P,)
         intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=1e-3)  # (P,)
-        particle_losses = bbox_loss + intersection_loss  # (P,)
-        # masked_losses = particle_losses * active_mask.float()
-        # total_loss = masked_losses.sum()
+        inside_loss = compute_vertex_inside_loss(transformed_vertices, threshold=1e-3)  # (P,)
+        particle_losses = bbox_loss + inside_loss + intersection_loss # (P,)
         total_loss = particle_losses.sum()
         
-        # Check for solution before backward pass
+        # check for sol
         if particle_losses.min().item() < 1e-8:
-        # if particle_losses[best_idx] < 1e-8:
             found_solution = True
             if device == "cuda":
                 torch.cuda.synchronize()
@@ -274,40 +346,13 @@ def optimize(
             best_idx = particle_losses.argmin().item()
             print(f"Solution found at epoch {epoch}, particle {best_idx}")
             print(f"Time to solution: {time_to_solution:.4f}s")
-            print("bbox loss:", bbox_loss[best_idx])
-            print("intersection loss:", intersection_loss[best_idx])
-
-            # debug bbox
-            min_corner = goal_aabb[0]  # (2,)
-            max_corner = goal_aabb[1]  # (2,)
-            print(min_corner, max_corner)
-            # transformed_vertices is (P, T, 3, 2), so iterate over T dimension
-            T = transformed_vertices.shape[1]
-            for t in range(T):
-                print(f"Triangle {t}:", transformed_vertices[best_idx, t])
-
+            # print("bbox loss:", bbox_loss[best_idx])
+            # print("intersection loss:", intersection_loss[best_idx])
+            # print("inside loss:", inside_loss[best_idx])
             break
         
         total_loss.backward()
-        
-        # # Zero out gradients for frozen particles
-        # if not active_mask.all():
-        #     if params.grad is not None:
-        #         params.grad[~active_mask] = 0
-        
         optimizer.step()
-        
-        # # Freeze particles with zero loss after this epoch
-        # newly_frozen = particle_losses < 1e-8
-        # if newly_frozen.any():
-        #     active_mask = active_mask & ~newly_frozen
-            # num_frozen = (~active_mask).sum().item()
-            # print(f"Epoch {epoch}: Froze {newly_frozen.sum().item()} particles (total frozen: {num_frozen})")
-        
-        # if epoch % 5 == 0 or epoch == epochs - 1:
-        #     print(f"Epoch {epoch}: Loss = {total_loss.item():.6f}, "
-        #           f"Active particles: {active_mask.sum().item()}, "
-        #           f"Min particle loss: {particle_losses.min().item():.6f}")
 
     best_idx = particle_losses.argmin().item()
     if not found_solution:
@@ -326,7 +371,6 @@ def optimize(
             # centered_vertices = vertices - triangle_centroid
             # vertices = centered_vertices @ rot_matrix.T + xy
             transformed_vertices = transform_vertices(vertices, params[best_idx, i, :]).detach().clone()
-            print("visualized vertices=", vertices)
 
             vertices_3d = torch.cat(
                 (transformed_vertices, torch.zeros_like(transformed_vertices[:, :1])), dim=1
@@ -344,9 +388,7 @@ def optimize(
 
 
 if __name__ == "__main__":
-    # Use device="cpu" if you don't have a GPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_particles = 1024
+    num_particles = 512
     torch.manual_seed(13)
-    duration = optimize(num_triangles=3, env_idx=1, num_particles=num_particles, visualize=True, device=device)
-    # print("Time to solution:", duration)
+    duration = optimize(num_triangles=6, env_idx=0, num_particles=num_particles, visualize=True, device=device)

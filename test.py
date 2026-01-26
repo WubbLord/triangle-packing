@@ -20,7 +20,5 @@ import time
 # ], dim=-1)
 # print(rot_matrices)
 
-a = torch.randn((3, 4, 5))
-print(a)
-print(a[:, 2])
-print(a[:, 2].shape)
+a = torch.randn((5, 3))
+print(a.any())
