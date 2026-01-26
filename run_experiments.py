@@ -12,6 +12,7 @@ def run_experiments():
     results = []
     for num_triangles in all_triangles:
         for env_idx in env_idxs:
+            print("-" * 100)
             print(f"Running experiments for {num_triangles} triangles and environment {env_idx}")
             time_to_solutions = []
             for run_idx in range(num_runs_per_env):
@@ -44,4 +45,5 @@ def run_experiments():
 
 if __name__ == "__main__":
     torch.manual_seed(13)
+    torch.cuda.manual_seed(13)
     run_experiments()

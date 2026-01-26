@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
 import time
 
 # a = torch.ones((500, 500, 500))
@@ -19,6 +21,14 @@ import time
 #     torch.stack([sin, cos], dim=-1), # (P, T, 2)
 # ], dim=-1)
 # print(rot_matrices)
+threshold = 1e-3
+softplus = nn.Softplus(beta=10)
+t = torch.linspace(-5, 5, 1000)
+softplus = nn.Softplus(beta=20, threshold=1)
+blend_t = torch.sigmoid(20 * (t - 0.5))
+left_t = softplus(t + threshold)
+right_t = softplus(1 + threshold - t)
 
-a = torch.randn((5, 3))
-print(a.any())
+dist_t = (1 - blend_t) * left_t + blend_t * right_t
+plt.plot(t, dist_t)
+plt.show()

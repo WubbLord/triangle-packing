@@ -5,8 +5,7 @@ from datetime import datetime
 
 import rerun as rr
 import torch
-
-from typing import Optional
+import torch.nn as nn
 
 assets_dir = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -168,16 +167,24 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     t = (AC[..., 0] * CD[..., 1] - AC[..., 1] * CD[..., 0]) / denom_safe  # (AC x CD) / (AB x CD) => (P, T, T, 3, 3)
     s = (AC[..., 0] * AB[..., 1] - AC[..., 1] * AB[..., 0]) / denom_safe  # (AC x AB) / (AB x CD) => (P, T, T, 3, 3)
     
-    dist_t = torch.relu(-t) + torch.relu(t - 1)
-    dist_s = torch.relu(-s) + torch.relu(s - 1)
-    # dist_t = torch.relu(t) * (t < 0.5) + torch.relu(t - 1) * (t > 0.5)
-    # dist_s = torch.relu(s) * (s < 0.5) + torch.relu(s - 1) * (s > 0.5)
-    dist = dist_t + dist_s  # (P, T, T, 3, 3)
-    
-    # set large distance for parallel edges
-    dist = torch.where(parallel_mask, torch.ones_like(dist) * 5.0, dist)
-    loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
+    # # set large distance for parallel edges
+    # dist = torch.where(parallel_mask, torch.ones_like(dist) * 5.0, dist)
+    # loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
     # loss = torch.relu(dist - threshold)  # (P, T, T, 3, 3)
+
+    # dist_t = torch.relu(-t) + torch.relu(t - 1)                                                                                                           
+    # dist_s = torch.relu(-s) + torch.relu(s - 1)                                                                                                           
+    dist_t = (torch.relu(t + threshold)) * (t < 0.5) + torch.relu(1 + threshold - t) * (t >= 0.5)                                                         
+    dist_s = (torch.relu(s + threshold)) * (s < 0.5) + torch.relu(1 + threshold - s) * (s >= 0.5)
+
+    # softplus = nn.Softplus(beta=10e7, threshold=2e-7)
+    # blend_t = torch.sigmoid(20 * (t - 0.5))
+    # blend_s = torch.sigmoid(20 * (s - 0.5))
+    # dist_t = (1 - blend_t) * softplus(t + threshold) + blend_t * softplus(1 + threshold - t)
+    # dist_s = (1 - blend_s) * softplus(s + threshold) + blend_s * softplus(1 + threshold - s)
+    loss = dist_t + dist_s  # (P, T, T, 3, 3)
+    
+    
     
     # remove double counting and comparisons within same triangle
     upper_triangle_mask = torch.triu(torch.ones(T, T, device=transformed_vertices.device, dtype=torch.bool), diagonal=1)
@@ -188,7 +195,7 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     return total_loss
 
 
-def compute_vertex_inside_loss(transformed_vertices, threshold=1e-3):
+def compute_vertex_inside_loss(transformed_vertices):
     """
     Compute loss for vertices that are inside other triangles.
     Uses cross products to check if a point is inside (CCW triangles).
@@ -196,7 +203,6 @@ def compute_vertex_inside_loss(transformed_vertices, threshold=1e-3):
     
     Args:
         transformed_vertices: (P, T, 3, 2) tensor
-        threshold: not used currently, kept for API consistency
     Returns:
         (P,) - loss for each particle
     """
@@ -333,10 +339,16 @@ def optimize(
         
         bbox_loss = compute_bbox_loss(transformed_vertices, goal_aabb)  # (P,)
         intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=1e-3)  # (P,)
-        inside_loss = compute_vertex_inside_loss(transformed_vertices, threshold=1e-3)  # (P,)
+        inside_loss = compute_vertex_inside_loss(transformed_vertices)  # (P,)
         particle_losses = bbox_loss + inside_loss + intersection_loss # (P,)
         total_loss = particle_losses.sum()
         
+        if epoch == 0:
+            print("initial bbox loss:", bbox_loss[0].item())
+            print("initial intersection loss:", intersection_loss[0].item())
+            print("initial inside loss:", inside_loss[0].item())
+            print("initial total loss:", particle_losses[0].item())
+
         # check for sol
         if particle_losses.min().item() < 1e-8:
             found_solution = True
@@ -346,9 +358,7 @@ def optimize(
             best_idx = particle_losses.argmin().item()
             print(f"Solution found at epoch {epoch}, particle {best_idx}")
             print(f"Time to solution: {time_to_solution:.4f}s")
-            # print("bbox loss:", bbox_loss[best_idx])
-            # print("intersection loss:", intersection_loss[best_idx])
-            # print("inside loss:", inside_loss[best_idx])
+            print("total loss:", particle_losses[best_idx].item())
             break
         
         total_loss.backward()
@@ -358,6 +368,10 @@ def optimize(
     if not found_solution:
         print(f"No solution found. Best particle {best_idx} has loss {particle_losses[best_idx].item():.6f}")
         print(f"Time spent: {time.perf_counter() - start_time:.4f}s")
+    
+        print("bbox loss:", bbox_loss[best_idx].item())
+        print("intersection loss:", intersection_loss[best_idx].item())
+        print("inside loss:", inside_loss[best_idx].item())
     
     # Visualize best attempt
     if visualize:
@@ -391,4 +405,5 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     num_particles = 512
     torch.manual_seed(13)
-    duration = optimize(num_triangles=6, env_idx=0, num_particles=num_particles, visualize=True, device=device)
+    torch.cuda.manual_seed(13)
+    duration = optimize(num_triangles=3, env_idx=2, num_particles=num_particles, visualize=True, device=device)
