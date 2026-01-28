@@ -115,12 +115,9 @@ def transform_vertices(vertices, params):
 
 def compute_bbox_loss(transformed_vertices, goal_aabb):
     """
-    Compute ReLU loss for vertices outside bounding box.
-    Args:
-        transformed_vertices: (P, T, 3, 2) tensor
-        goal_aabb: (2, 2) - [min_corner, max_corner]
-    Returns:
-        (P,) - loss for each particle
+    Compute ReLU loss for vertices outside goal box
+    transformed_vertices: (P, T, 3, 2) tensor
+    goal_aabb: (2, 2) - [min_corner, max_corner]
     """
     min_corner = goal_aabb[0]  # (2,)
     max_corner = goal_aabb[1]  # (2,)
@@ -130,12 +127,9 @@ def compute_bbox_loss(transformed_vertices, goal_aabb):
 
 def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     """
-    Compute ReLU signed distance loss for edge intersections between triangles.
-    Args:
-        transformed_vertices: (P, T, 3, 2) tensor
-        threshold: threshold for considering distance as zero
-    Returns:
-        (P,) - loss for each particle
+    Compute ReLU distance loss for edge intersections between triangles
+    transformed_vertices: (P, T, 3, 2) tensor
+    threshold: threshold for considering distance as zero
     """
     T = transformed_vertices.shape[-3]
     
@@ -166,24 +160,24 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     denom_safe = torch.where(parallel_mask, torch.ones_like(denom) * 1e-8, denom)
     t = (AC[..., 0] * CD[..., 1] - AC[..., 1] * CD[..., 0]) / denom_safe  # (AC x CD) / (AB x CD) => (P, T, T, 3, 3)
     s = (AC[..., 0] * AB[..., 1] - AC[..., 1] * AB[..., 0]) / denom_safe  # (AC x AB) / (AB x CD) => (P, T, T, 3, 3)
-    
-    # # set large distance for parallel edges
-    # dist = torch.where(parallel_mask, torch.ones_like(dist) * 5.0, dist)
-    # loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
-    # loss = torch.relu(dist - threshold)  # (P, T, T, 3, 3)
 
-    # dist_t = torch.relu(-t) + torch.relu(t - 1)                                                                                                           
-    # dist_s = torch.relu(-s) + torch.relu(s - 1)                                                                                                           
-    dist_t = (torch.relu(t + threshold)) * (t < 0.5) + torch.relu(1 + threshold - t) * (t >= 0.5)                                                         
-    dist_s = (torch.relu(s + threshold)) * (s < 0.5) + torch.relu(1 + threshold - s) * (s >= 0.5)
+    dist_t = torch.relu(-t) + torch.relu(t - 1)                                                                                                           
+    dist_s = torch.relu(-s) + torch.relu(s - 1)                                                                                                           
+    # dist_t = (torch.relu(t + threshold)) * (t < 0.5) + torch.relu(1 + threshold - t) * (t >= 0.5)                                                         
+    # dist_s = (torch.relu(s + threshold)) * (s < 0.5) + torch.relu(1 + threshold - s) * (s >= 0.5)
+    dist = dist_t + dist_s # (P, T, T, 3, 3)
 
     # softplus = nn.Softplus(beta=10e7, threshold=2e-7)
     # blend_t = torch.sigmoid(20 * (t - 0.5))
     # blend_s = torch.sigmoid(20 * (s - 0.5))
     # dist_t = (1 - blend_t) * softplus(t + threshold) + blend_t * softplus(1 + threshold - t)
     # dist_s = (1 - blend_s) * softplus(s + threshold) + blend_s * softplus(1 + threshold - s)
-    loss = dist_t + dist_s  # (P, T, T, 3, 3)
-    
+    # loss = dist_t + dist_s # (P, T, T, 3, 3)
+        
+    # # set large distance for parallel edges
+    dist = torch.where(parallel_mask, torch.ones_like(dist) * 5.0, dist)
+    loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
+    # loss = torch.relu(dist - threshold)  # (P, T, T, 3, 3)
     
     
     # remove double counting and comparisons within same triangle
@@ -197,14 +191,8 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
 
 def compute_vertex_inside_loss(transformed_vertices):
     """
-    Compute loss for vertices that are inside other triangles.
-    Uses cross products to check if a point is inside (CCW triangles).
-    If inside, adds perpendicular distance to closest edge.
-    
-    Args:
-        transformed_vertices: (P, T, 3, 2) tensor
-    Returns:
-        (P,) - loss for each particle
+    Check if each vertex is inside another triangle, and if yes, adds perpendicular distance to closest edge.
+    transformed_vertices: (P, T, 3, 2) tensor
     """
     T = transformed_vertices.shape[-3]
     
@@ -212,8 +200,8 @@ def compute_vertex_inside_loss(transformed_vertices):
     
     tri = transformed_vertices.unsqueeze(1)  # (P, 1, T, 3, 2)
     A = tri[..., 0, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
-    B = tri[..., 1, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
-    C = tri[..., 2, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
+    B = tri[..., 1, :].unsqueeze(-2)
+    C = tri[..., 2, :].unsqueeze(-2)
     
     XA = A - X  # (P, T, T, 3, 2)
     XB = B - X
@@ -224,50 +212,31 @@ def compute_vertex_inside_loss(transformed_vertices):
     cross_bc = XB[..., 0] * XC[..., 1] - XB[..., 1] * XC[..., 0]
     cross_ca = XC[..., 0] * XA[..., 1] - XC[..., 1] * XA[..., 0]
     
-    # Inside if all cross products >= 0 (point on left side of all edges)
     inside_mask = (cross_ab >= 0) & (cross_bc >= 0) & (cross_ca >= 0)  # (P, T, T, 3)
     
-    # Exclude same triangle (vertex should not be checked against its own triangle)
-    same_tri_mask = torch.eye(T, device=transformed_vertices.device, dtype=torch.bool)
-    same_tri_mask = same_tri_mask.view(1, T, T, 1)  # (1, T_i, T_j, 1)
-    inside_mask = inside_mask & ~same_tri_mask
+    # same_tri_mask = torch.eye(T, device=transformed_vertices.device, dtype=torch.bool)
+    # same_tri_mask = same_tri_mask.view(1, T, T, 1)  # (1, T_i, T_j, 1)
+    # inside_mask = inside_mask & ~same_tri_mask
     
-    # Compute perpendicular distances to edges
-    # Distance from point X to edge PQ = |PQ × PX| / |PQ|
-    # Edge vectors
-    AB = B - A  # (P, 1, T, 1, 2)
+    # dist from point X to edge PQ = |PQ × PX| / |PQ|
+    AB = B - A # (P, 1, T, 1, 2)
     BC = C - B
     CA = A - C
-    
-    # Vectors from edge start to point X
-    AX = X - A  # broadcasts to (P, T, T, 3, 2)
+    AX = X - A # (P, T, T, 3, 2)
     BX = X - B
     CX = X - C
-    
-    # Cross products for perpendicular distance (2D cross gives signed area * 2)
-    cross_AB_AX = AB[..., 0] * AX[..., 1] - AB[..., 1] * AX[..., 0]  # (P, T, T, 3)
+    cross_AB_AX = AB[..., 0] * AX[..., 1] - AB[..., 1] * AX[..., 0] # (P, T, T, 3)
     cross_BC_BX = BC[..., 0] * BX[..., 1] - BC[..., 1] * BX[..., 0]
     cross_CA_CX = CA[..., 0] * CX[..., 1] - CA[..., 1] * CX[..., 0]
     
-    # Edge lengths
     eps = 1e-8
-    len_AB = AB.norm(dim=-1) + eps  # (P, 1, T, 1)
-    len_BC = BC.norm(dim=-1) + eps
-    len_CA = CA.norm(dim=-1) + eps
+    dist_AB = cross_AB_AX.abs() / (AB.norm(dim=-1) + eps) # (P, T, T, 3)
+    dist_BC = cross_BC_BX.abs() / (BC.norm(dim=-1) + eps)
+    dist_CA = cross_CA_CX.abs() / (CA.norm(dim=-1) + eps)
+    min_dist = torch.minimum(torch.minimum(dist_AB, dist_BC), dist_CA) # (P, T, T, 3)
     
-    # Perpendicular distances (absolute value since we want distance, not signed)
-    dist_AB = cross_AB_AX.abs() / len_AB  # (P, T, T, 3)
-    dist_BC = cross_BC_BX.abs() / len_BC
-    dist_CA = cross_CA_CX.abs() / len_CA
-    
-    # Minimum distance to any edge
-    min_dist = torch.minimum(torch.minimum(dist_AB, dist_BC), dist_CA)  # (P, T, T, 3)
-    
-    # Loss: only count vertices that are inside another triangle
-    loss = min_dist * inside_mask.float()  # (P, T, T, 3)
-    
-    # Sum over all vertex-triangle pairs
-    total_loss = loss.sum(dim=(-1, -2, -3))  # (P,)
+    loss = min_dist * inside_mask.float() # (P, T, T, 3)
+    total_loss = loss.sum(dim=(-1, -2, -3)) # (P,)
     
     return total_loss
 
