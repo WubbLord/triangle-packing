@@ -350,7 +350,7 @@ def optimize(
             best_idx = particle_losses.argmin().item()
             print(f"Solution found at epoch {epoch}, particle {best_idx}")
             print(f"Time to solution: {time_to_solution:.4f}s")
-            print("total loss:", particle_losses[best_idx].item())
+            # print("total loss:", particle_losses[best_idx].item())
             break
 
         total_loss.backward()
@@ -383,9 +383,9 @@ def optimize(
                 ),
             )
 
-    # if found_solution: return time_to_solution
-    # return float("inf")
-    return time_to_solution
+    if found_solution: return time_to_solution
+    return float("inf")
+    # return time_to_solution
 
 
 if __name__ == "__main__":
