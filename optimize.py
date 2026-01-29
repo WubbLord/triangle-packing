@@ -244,10 +244,8 @@ def compute_SAT_loss(transformed_vertices, threshold=1e-3):
     axes = torch.stack([-edge_dirs[..., 1], edge_dirs[..., 0]], dim=-1) # (P, T, 3, 2)
     axes = axes.unsqueeze(dim=-2).unsqueeze(dim=-4) # (P, T, 1, 3, 1, 2)
     proj = torch.linalg.vecdot(X, axes, dim=-1) # (P, T, T, 3, 3)
-    # print(proj.shape)
 
     self_proj = proj.diagonal(dim1=-4, dim2=-3).movedim(-1, -3) # (P, T, 3, 3)
-    # print(self_proj.shape)
     self_proj = torch.stack([self_proj] * T, dim=-3) # (P, T, T, 3, 3)
     proj_pairs = torch.stack([proj, self_proj], dim=-2) # (P, T, T, 3, 2, 3)
     first = proj_pairs[..., 0, :]
@@ -260,7 +258,7 @@ def compute_SAT_loss(transformed_vertices, threshold=1e-3):
 
     loss = torch.relu(threshold - max_gap)
     # loss = torch.relu(-max_gap)
-    total_loss = torch.sum(loss, dim=(-1, -2))
+    total_loss = torch.sum(loss, dim=(-1, -2)) - threshold * T
     return total_loss
 
 def optimize(
@@ -322,7 +320,7 @@ def optimize(
     params = torch.stack([particles[triangle] for triangle in triangles], dim=1).requires_grad_(True) # (P, T, 3)
     optimizer = torch.optim.Adam([params], lr=0.01)
 
-    epochs = 2000
+    epochs = 1000
     for epoch in range(epochs):
         optimizer.zero_grad()
         
@@ -330,8 +328,8 @@ def optimize(
         
         threshold = 1e-3
         bbox_loss = compute_bbox_loss(transformed_vertices, goal_aabb, threshold=threshold)  # (P,)
-        intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=threshold)  # (P,)
-        inside_loss = compute_vertex_inside_loss(transformed_vertices)  # (P,)
+        # intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=threshold)  # (P,)
+        # inside_loss = compute_vertex_inside_loss(transformed_vertices)  # (P,)
         SAT_loss = compute_SAT_loss(transformed_vertices, threshold=threshold)
         # particle_losses = bbox_loss + inside_loss + intersection_loss # (P,)
         particle_losses = bbox_loss + SAT_loss # (P,)
@@ -344,20 +342,14 @@ def optimize(
         #     print("initial SAT loss:", SAT_loss[0].item())
         #     print("initial total loss:", particle_losses[0].item())
 
-        # check for sol
-        sat_ok = SAT_loss < threshold * num_triangles**2 + 1e-8
-        bbox_ok = bbox_loss < 1e-8
-        ok = sat_ok & bbox_ok
-        if ok.any():
+        if particle_losses.min().item() < 1e-8:
             found_solution = True
             if device == "cuda":
                 torch.cuda.synchronize()
             time_to_solution = time.perf_counter() - start_time
-            best_idx = ok.nonzero(as_tuple=True)[0][0].item()
+            best_idx = particle_losses.argmin().item()
             print(f"Solution found at epoch {epoch}, particle {best_idx}")
             print(f"Time to solution: {time_to_solution:.4f}s")
-            print("SAT loss:", SAT_loss[best_idx].item())
-            print("bbox loss:", bbox_loss[best_idx].item())
             print("total loss:", particle_losses[best_idx].item())
             break
 
@@ -367,26 +359,19 @@ def optimize(
     best_idx = particle_losses.argmin().item()
     if not found_solution:
         print(f"No solution found. Best particle {best_idx} has loss {particle_losses[best_idx].item():.6f}")
-        print(f"Time spent: {time.perf_counter() - start_time:.4f}s")
+        time_to_solution = time.perf_counter() - start_time
+        print(f"Time spent: {time_to_solution:.4f}s")
     
         print("bbox loss:", bbox_loss[best_idx].item())
-        print("intersection loss:", intersection_loss[best_idx].item())
-        print("inside loss:", inside_loss[best_idx].item())
+        # print("intersection loss:", intersection_loss[best_idx].item())
+        # print("inside loss:", inside_loss[best_idx].item())
         print("SAT loss:", SAT_loss[best_idx].item())
     
     # Visualize best attempt
     if visualize:
         for i, (triangle, vertices) in enumerate(triangles.items()):
-            # xy_rot = particles[triangle][best_idx].detach().clone()
-            # Transform the triangle vertices by the rotation and xy translation
-            # xy = xy_rot[:2]
-            # rot = xy_rot[2]
-            # rot_matrix = torch.tensor([[rot.cos(), -rot.sin()], [rot.sin(), rot.cos()]])
-            # triangle_centroid = vertices.sum(dim=0).div(vertices.shape[0])
-            # centered_vertices = vertices - triangle_centroid
-            # vertices = centered_vertices @ rot_matrix.T + xy
             transformed_vertices = transform_vertices(vertices, params[best_idx, i, :]).detach().clone()
-
+            # print(transformed_vertices)
             vertices_3d = torch.cat(
                 (transformed_vertices, torch.zeros_like(transformed_vertices[:, :1])), dim=1
             )
@@ -398,8 +383,9 @@ def optimize(
                 ),
             )
 
-    if found_solution: return time_to_solution
-    return float("inf")
+    # if found_solution: return time_to_solution
+    # return float("inf")
+    return time_to_solution
 
 
 if __name__ == "__main__":

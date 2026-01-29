@@ -5,7 +5,7 @@ import numpy as np
 
 def run_experiments():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_runs_per_env = 1
+    num_runs_per_env = 5
     env_idxs = list(range(10))
     all_triangles = [i for i in range(3, 7)]
 
