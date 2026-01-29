@@ -107,22 +107,22 @@ def transform_vertices(vertices, params):
         torch.stack([sin, cos], dim=-1),   # (P, T, 2)
     ], dim=-2)  # (P, T, 2, 2)
     centroid = vertices.mean(dim=-2)  # (T, 2)
-    centered = vertices - centroid.unsqueeze(dim=-2)   # (T, 3, 2)
+    centered = vertices - centroid.unsqueeze(dim=-2)  # (T, 3, 2)
     rotated = centered @ rot_matrices.transpose(-1, -2)  # (P, T, 3, 2)
     transformed = rotated + xy.unsqueeze(-2)  # (P, T, 3, 2)
     
     return transformed
 
-def compute_bbox_loss(transformed_vertices, goal_aabb):
+def compute_bbox_loss(transformed_vertices, goal_aabb, threshold=1e-3):
     """
-    compute relu loss for vertices outside goal box
+    compute relu loss for vertices outside bbox
     transformed_vertices: (P, T, 3, 2) tensor
     goal_aabb: (2, 2) - [min_corner, max_corner]
     """
     min_corner = goal_aabb[0]  # (2,)
     max_corner = goal_aabb[1]  # (2,)
     
-    loss = (torch.relu(min_corner - transformed_vertices) + torch.relu(transformed_vertices - max_corner)).sum(dim=(3, 2, 1)) # MAYBE optimize
+    loss = (torch.relu(min_corner - transformed_vertices + threshold) + torch.relu(transformed_vertices - max_corner + threshold)).sum(dim=(3, 2, 1))
     return loss
 
 def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
@@ -135,15 +135,13 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     
     v0, v1, v2 = transformed_vertices[..., 0, :], transformed_vertices[..., 1, :], transformed_vertices[..., 2, :]  # each (P, T, 2)
     edges = torch.stack([
-        torch.stack([v0, v1], dim=-2),  # edge 0: v0 -> v1
-        torch.stack([v1, v2], dim=-2),  # edge 1: v1 -> v2
-        torch.stack([v2, v0], dim=-2),  # edge 2: v2 -> v0
+        torch.stack([v0, v1], dim=-2),  # (P, T, 2, 2)
+        torch.stack([v1, v2], dim=-2),
+        torch.stack([v2, v0], dim=-2),
     ], dim=-3)  # (P, T, 3, 2, 2)
     
-    # reshape for broadcasting
     edges_i = edges.unsqueeze(2).unsqueeze(4)  # (P, T, 1, 3, 1, 2, 2)
     edges_j = edges.unsqueeze(1).unsqueeze(3)  # (P, 1, T, 1, 3, 2, 2)
-    # endpoints A, B from edges_i; C, D from edges_j
     A = edges_i[..., 0, :]  # (P, T, 1, 3, 1, 2)
     B = edges_i[..., 1, :]  # (P, T, 1, 3, 1, 2)
     C = edges_j[..., 0, :]  # (P, 1, T, 1, 3, 2)
@@ -179,8 +177,6 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     loss = torch.relu(threshold - dist)  # (P, T, T, 3, 3)
     # loss = torch.relu(dist - threshold)  # (P, T, T, 3, 3)
     
-    
-    # remove double counting and comparisons within same triangle
     upper_triangle_mask = torch.triu(torch.ones(T, T, device=transformed_vertices.device, dtype=torch.bool), diagonal=1)
     upper_triangle_mask = upper_triangle_mask.view(1, T, T, 1, 1)
     masked_loss = loss * upper_triangle_mask # (P, T, T, 3, 3)
@@ -194,31 +190,21 @@ def compute_vertex_inside_loss(transformed_vertices):
     check if each vertex is inside another triangle, and if yes, add perpendicular distance to closest edge
     transformed_vertices: (P, T, 3, 2) tensor
     """
-    T = transformed_vertices.shape[-3]
-    
     X = transformed_vertices.unsqueeze(2)  # (P, T, 1, 3, 2)
     
     tri = transformed_vertices.unsqueeze(1)  # (P, 1, T, 3, 2)
     A = tri[..., 0, :].unsqueeze(-2)  # (P, 1, T, 1, 2)
     B = tri[..., 1, :].unsqueeze(-2)
     C = tri[..., 2, :].unsqueeze(-2)
-    
     XA = A - X  # (P, T, T, 3, 2)
     XB = B - X
     XC = C - X
     
-    # point X is inside tri if all cross products >= 0
     cross_ab = XA[..., 0] * XB[..., 1] - XA[..., 1] * XB[..., 0]  # (P, T, T, 3)
     cross_bc = XB[..., 0] * XC[..., 1] - XB[..., 1] * XC[..., 0]
     cross_ca = XC[..., 0] * XA[..., 1] - XC[..., 1] * XA[..., 0]
+    inside = (cross_ab >= 0) & (cross_bc >= 0) & (cross_ca >= 0)  # (P, T, T, 3)
     
-    inside_mask = (cross_ab >= 0) & (cross_bc >= 0) & (cross_ca >= 0)  # (P, T, T, 3)
-    
-    # same_tri_mask = torch.eye(T, device=transformed_vertices.device, dtype=torch.bool)
-    # same_tri_mask = same_tri_mask.view(1, T, T, 1)  # (1, T_i, T_j, 1)
-    # inside_mask = inside_mask & ~same_tri_mask
-    
-    # dist from point X to edge PQ = |PQ × PX| / |PQ|
     AB = B - A # (P, 1, T, 1, 2)
     BC = C - B
     CA = A - C
@@ -234,10 +220,9 @@ def compute_vertex_inside_loss(transformed_vertices):
     dist_BC = cross_BC_BX.abs() / (BC.norm(dim=-1) + eps)
     dist_CA = cross_CA_CX.abs() / (CA.norm(dim=-1) + eps)
     min_dist = torch.minimum(torch.minimum(dist_AB, dist_BC), dist_CA) # (P, T, T, 3)
-    
-    loss = min_dist * inside_mask.float() # (P, T, T, 3)
+
+    loss = min_dist * inside.float() # (P, T, T, 3)
     total_loss = loss.sum(dim=(-1, -2, -3)) # (P,)
-    
     return total_loss
 
 
@@ -247,8 +232,36 @@ def compute_SAT_loss(transformed_vertices, threshold=1e-3):
     transformed_vertices: (P, T, 3, 2) tensor
     '''
     T = transformed_vertices.shape[-3]
+    
+    X = transformed_vertices.unsqueeze(dim=-3).unsqueeze(dim=-5) # (P, 1, T, 1, 3, 2)
 
+    edge_dirs = torch.stack([
+        transformed_vertices[..., 1, :] - transformed_vertices[..., 0, :],
+        transformed_vertices[..., 2, :] - transformed_vertices[..., 1, :],
+        transformed_vertices[..., 0, :] - transformed_vertices[..., 2, :]
+    ], dim = -2) # (P, T, 3, 2)
 
+    axes = torch.stack([-edge_dirs[..., 1], edge_dirs[..., 0]], dim=-1) # (P, T, 3, 2)
+    axes = axes.unsqueeze(dim=-2).unsqueeze(dim=-4) # (P, T, 1, 3, 1, 2)
+    proj = torch.linalg.vecdot(X, axes, dim=-1) # (P, T, T, 3, 3)
+    # print(proj.shape)
+
+    self_proj = proj.diagonal(dim1=-4, dim2=-3).movedim(-1, -3) # (P, T, 3, 3)
+    # print(self_proj.shape)
+    self_proj = torch.stack([self_proj] * T, dim=-3) # (P, T, T, 3, 3)
+    proj_pairs = torch.stack([proj, self_proj], dim=-2) # (P, T, T, 3, 2, 3)
+    first = proj_pairs[..., 0, :]
+    second = proj_pairs[..., 1, :]
+
+    gap = torch.maximum(second.amin(dim=-1) - first.amax(dim=-1), first.amin(dim=-1) - second.amax(dim=-1)) # (P, T, T, 3)
+    max_gap = gap.amax(dim=-1) # (P, T, T)
+    diag_mask = torch.eye(T, device=transformed_vertices.device).unsqueeze(dim=0)
+    max_gap = max_gap * (1 - diag_mask)
+
+    loss = torch.relu(threshold - max_gap)
+    # loss = torch.relu(-max_gap)
+    total_loss = torch.sum(loss, dim=(-1, -2))
+    return total_loss
 
 def optimize(
     num_triangles: int,
@@ -315,30 +328,39 @@ def optimize(
         
         transformed_vertices = transform_vertices(vertices, params) # (P, T, 3, 2)
         
-        bbox_loss = compute_bbox_loss(transformed_vertices, goal_aabb)  # (P,)
-        intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=1e-3)  # (P,)
+        threshold = 1e-3
+        bbox_loss = compute_bbox_loss(transformed_vertices, goal_aabb, threshold=threshold)  # (P,)
+        intersection_loss = compute_edge_intersection_loss(transformed_vertices, threshold=threshold)  # (P,)
         inside_loss = compute_vertex_inside_loss(transformed_vertices)  # (P,)
-        particle_losses = bbox_loss + inside_loss + intersection_loss # (P,)
+        SAT_loss = compute_SAT_loss(transformed_vertices, threshold=threshold)
+        # particle_losses = bbox_loss + inside_loss + intersection_loss # (P,)
+        particle_losses = bbox_loss + SAT_loss # (P,)
         total_loss = particle_losses.sum()
         
-        if epoch == 0:
-            print("initial bbox loss:", bbox_loss[0].item())
-            print("initial intersection loss:", intersection_loss[0].item())
-            print("initial inside loss:", inside_loss[0].item())
-            print("initial total loss:", particle_losses[0].item())
+        # if epoch == 0:
+        #     print("initial bbox loss:", bbox_loss[0].item())
+        #     print("initial intersection loss:", intersection_loss[0].item())
+        #     print("initial inside loss:", inside_loss[0].item())
+        #     print("initial SAT loss:", SAT_loss[0].item())
+        #     print("initial total loss:", particle_losses[0].item())
 
         # check for sol
-        if particle_losses.min().item() < 1e-8:
+        sat_ok = SAT_loss < threshold * num_triangles**2 + 1e-8
+        bbox_ok = bbox_loss < 1e-8
+        ok = sat_ok & bbox_ok
+        if ok.any():
             found_solution = True
             if device == "cuda":
                 torch.cuda.synchronize()
             time_to_solution = time.perf_counter() - start_time
-            best_idx = particle_losses.argmin().item()
+            best_idx = ok.nonzero(as_tuple=True)[0][0].item()
             print(f"Solution found at epoch {epoch}, particle {best_idx}")
             print(f"Time to solution: {time_to_solution:.4f}s")
+            print("SAT loss:", SAT_loss[best_idx].item())
+            print("bbox loss:", bbox_loss[best_idx].item())
             print("total loss:", particle_losses[best_idx].item())
             break
-        
+
         total_loss.backward()
         optimizer.step()
 
@@ -350,6 +372,7 @@ def optimize(
         print("bbox loss:", bbox_loss[best_idx].item())
         print("intersection loss:", intersection_loss[best_idx].item())
         print("inside loss:", inside_loss[best_idx].item())
+        print("SAT loss:", SAT_loss[best_idx].item())
     
     # Visualize best attempt
     if visualize:
@@ -384,4 +407,4 @@ if __name__ == "__main__":
     num_particles = 512
     torch.manual_seed(13)
     torch.cuda.manual_seed(13)
-    duration = optimize(num_triangles=3, env_idx=2, num_particles=num_particles, visualize=True, device=device)
+    duration = optimize(num_triangles=6, env_idx=7, num_particles=num_particles, visualize=True, device=device)
