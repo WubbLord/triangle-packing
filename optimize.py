@@ -115,7 +115,7 @@ def transform_vertices(vertices, params):
 
 def compute_bbox_loss(transformed_vertices, goal_aabb):
     """
-    Compute ReLU loss for vertices outside goal box
+    compute relu loss for vertices outside goal box
     transformed_vertices: (P, T, 3, 2) tensor
     goal_aabb: (2, 2) - [min_corner, max_corner]
     """
@@ -127,7 +127,7 @@ def compute_bbox_loss(transformed_vertices, goal_aabb):
 
 def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
     """
-    Compute ReLU distance loss for edge intersections between triangles
+    compute relu distance loss for edge intersections between triangles
     transformed_vertices: (P, T, 3, 2) tensor
     threshold: threshold for considering distance as zero
     """
@@ -191,7 +191,7 @@ def compute_edge_intersection_loss(transformed_vertices, threshold=1e-3):
 
 def compute_vertex_inside_loss(transformed_vertices):
     """
-    Check if each vertex is inside another triangle, and if yes, adds perpendicular distance to closest edge.
+    check if each vertex is inside another triangle, and if yes, add perpendicular distance to closest edge
     transformed_vertices: (P, T, 3, 2) tensor
     """
     T = transformed_vertices.shape[-3]
@@ -239,6 +239,15 @@ def compute_vertex_inside_loss(transformed_vertices):
     total_loss = loss.sum(dim=(-1, -2, -3)) # (P,)
     
     return total_loss
+
+
+def compute_SAT_loss(transformed_vertices, threshold=1e-3):
+    '''
+    compute relu loss on max gap between every pair of triangles over all projection axes; candidate axes are normal to the 6 edges in the pair
+    transformed_vertices: (P, T, 3, 2) tensor
+    '''
+    T = transformed_vertices.shape[-3]
+
 
 
 def optimize(
